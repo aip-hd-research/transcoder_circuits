@@ -128,7 +128,7 @@ def main(args):
     model, sparse_autoencoder, activations_loader = loader.load_session()
 
     # train SAE
-    sparse_autoencoder = train_sae_on_language_model(
+    sparse_autoencoder = train_sae_on_language_model(cfg,
         model, sparse_autoencoder, activations_loader,
         n_checkpoints=cfg.n_checkpoints,
         batch_size=cfg.train_batch_size,
