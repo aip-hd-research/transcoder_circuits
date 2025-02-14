@@ -17,7 +17,7 @@ from torch.distributions.categorical import Categorical
 from tqdm import tqdm
 from transformer_lens.hook_points import HookedRootModule, HookPoint
 
-from .geom_median.src.geom_median.torch import compute_geometric_median
+from .geom_median.src.geom_median.torch.main import compute_geometric_median
 
 
 class SparseAutoencoder(HookedRootModule):
@@ -106,11 +106,11 @@ class SparseAutoencoder(HookedRootModule):
 
     def forward(self, x, dead_neuron_mask = None, mse_target=None):
         # move x to correct dtype
-        x = x.to(self.dtype)
+        x = x.to(self.b_dec.dtype)
         sae_in = self.hook_sae_in(
             x - self.b_dec
         )  # Remove encoder bias as per Anthropic
-
+        
         hidden_pre = self.hook_hidden_pre(
             einops.einsum(
                 sae_in,
