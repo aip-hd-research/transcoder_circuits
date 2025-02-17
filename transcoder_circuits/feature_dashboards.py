@@ -3,6 +3,7 @@
 import numpy as np
 import tqdm
 import torch
+import os
 
 import matplotlib.pyplot as plt
 
@@ -10,7 +11,8 @@ from IPython.display import HTML
 from transformer_lens.utils import get_act_name, to_numpy
 
 
-
+os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
+os.environ["CUDA_VISIBLE_DEVICES"] = " 0"
 
 class EncoderConfig:
     def __init__(self, hook_point, hook_point_layer):
@@ -36,38 +38,32 @@ def run_with_cache(model, input_ids, stop_at_layer, device='cuda:0'):
 
 
 
-def get_feature_scores(model, tokenizer, encoder, tokens_arr, feature_idx, batch_size=64, act_name='resid_pre', layer=0, use_raw_scores=False, use_decoder=False, feature_post=None, ignore_endoftext=False):
-    #act_name = encoder.cfg.hook_point
-    #layer = encoder.cfg.hook_point_layer
-    
-    W_enc = encoder['state_dict']['W_enc'].to(torch.float16)
-    W_dec = encoder['state_dict']['W_dec'].to(torch.float16)
-    b_enc = encoder['state_dict']['b_enc'].to(torch.float16)  
-    b_dec = encoder['state_dict']['b_dec'].to(torch.float16)
-      
-    scores = []
-    endoftext_token = tokenizer.eos_token_id
-    for i in tqdm.tqdm(range(0, tokens_arr.shape[0], batch_size)):
-        with torch.no_grad():
-            batch_ids = tokens_arr[i:i + batch_size]
-            cache = run_with_cache(model, batch_ids, stop_at_layer=encoder_cfg.hook_point_layer)
-            mlp_acts = cache[encoder_cfg.hook_point]
+def get_feature_scores(model, encoder, tokens_arr, feature_idx, batch_size=64, act_name='resid_pre', layer=0, use_raw_scores=False, use_decoder=False, feature_post=None, ignore_endoftext=False):
+	act_name = encoder.cfg.hook_point
+	layer = encoder.cfg.hook_point_layer
+		
+	scores = []
+	endoftext_token = model.tokenizer.eos_token 
+	for i in tqdm.tqdm(range(0, tokens_arr.shape[0], batch_size)):
+		with torch.no_grad():
+			_, cache = model.run_with_cache(tokens_arr[i:i+batch_size], stop_at_layer=layer+1, names_filter=[
+				act_name
+			])
+			mlp_acts = cache[act_name]
+			mlp_acts_flattened = mlp_acts.reshape(-1, encoder.W_enc.shape[0])
+			if feature_post is None:
+				feature_post = encoder.W_enc[:, feature_idx] if not use_decoder else encoder.W_dec[feature_idx]
+			bias = -(encoder.b_dec @ feature_post) if use_decoder else encoder.b_enc[feature_idx] - (encoder.b_dec @ feature_post)
+			if use_raw_scores:
+				cur_scores = (mlp_acts_flattened @ feature_post) + bias
+			else:
+				_, hidden_acts, _, _, _, _ = encoder(mlp_acts_flattened)
+				cur_scores = hidden_acts[:, feature_idx]
+			if ignore_endoftext:
+					cur_scores[tokens_arr[i:i+batch_size].reshape(-1) == endoftext_token] = -torch.inf
+		scores.append(to_numpy(cur_scores.reshape(-1, tokens_arr.shape[1])).astype(np.float16))
+	return np.concatenate(scores)
 
-            mlp_acts_flattened = mlp_acts.reshape(-1, W_enc.shape[0])
-            if feature_post is None:
-                feature_post = W_enc[:, feature_idx] if not use_decoder else W_enc[feature_idx]
-            bias = -(b_dec @ feature_post) if use_decoder else b_enc - (b_dec @ feature_post)
-            if use_raw_scores:
-                cur_scores = (mlp_acts_flattened @ feature_post) + bias
-            else:
-                #_, hidden_acts, _, _, _, _ = encoder(mlp_acts_flattened)
-                hidden_acts = torch.relu((torch.matmul(mlp_acts_flattened, W_enc) + b_enc)  )
-                cur_scores = hidden_acts[:, feature_idx]
-            if ignore_endoftext:
-                cur_scores[tokens_arr[i:i+batch_size].reshape(-1) == endoftext_token] = -torch.inf
-            scores.append(cur_scores.reshape(-1, tokens_arr.shape[1]).cpu().numpy().astype(np.float16))
-
-    return np.concatenate(scores)
 
 # get indices and values at uniform percentiles of arr
 def sample_percentiles(arr, num_samples):
@@ -224,20 +220,31 @@ def get_uniform_band_examples(scores, uniform_vals, uniform_idxs, num_bands, ban
         retlist.append((low_score, high_score, num_examples_in_band, uniform_idxs[np.logical_and(uniform_vals>=low_score, uniform_vals<=high_score)]))
     return retlist
 
-def display_activating_examples_dash(model, all_tokens, scores,
+
+    
+    
+    
+    
+    
+    
+def display_activating_examples_dash(model, tokenizer, all_tokens, scores,
      num_examples=50,
      num_bands=5,
      bandwidth=10,
      return_percentages=True,
      window_size=5,
-     header_level=3
+     header_level=3,
+     output_file_path='output.html'
     ):
+    
+    cur_html_list = []
+    
     if type(header_level) is int:
         header_tag = f'h{header_level}'
     else:
         header_tag = 'p'
-
-    display(HTML(f"<{header_tag} style='font-family: serif'>Firing frequency: {100*np.sum(scores > 0)/np.prod(scores.shape):.4f}%</{header_tag}>"))
+    
+    cur_html_list.append(HTML(f"<{header_tag} style='font-family: serif'>Firing frequency: {100*np.sum(scores > 0)/np.prod(scores.shape):.4f}%</{header_tag}>"))
     uniform_vals, uniform_idxs = sample_uniform(scores, num_examples, unique=True)
     unif_bands = get_uniform_band_examples(scores, uniform_vals, uniform_idxs, num_bands, bandwidth, return_percentages=return_percentages)
     for band in reversed(unif_bands):
@@ -245,12 +252,29 @@ def display_activating_examples_dash(model, all_tokens, scores,
         for example_idx, token_idx in reversed(band[3]):
             cur_html_list.append(
                 make_sequence_html(
-                    model.to_str_tokens(all_tokens[example_idx]), scores[example_idx],
+                    #model.to_str_tokens(all_tokens[example_idx])
+                    tokenizer.decode(all_tokens[example_idx]), scores[example_idx],
                     scores_min=scores.min(), scores_max=scores.max(), return_head=True, cur_token_idx=token_idx, window_size=window_size
                 ) + f"<span> Example {example_idx}, token {token_idx}</span>" + "<br/>"
             )
         cur_html_list.append("</details>")
-        display(HTML("".join(cur_html_list)))
+        #display(HTML("".join(cur_html_list)))    
+        # Write the HTML content to a file
+    with open(output_file_path, 'w') as file:
+        file.write("<html><head><title>Activating Examples Dashboard</title></head><body>")
+        file.write("".join(cur_html_list))
+        file.write("</body></html>")
+
+    print(f"HTML file saved at: {output_file_path}")
+    
+    
+    
+    
+    
+    
+    
+    
+
 
 def get_logits_for_feature(model, sae, feature_idx, k=7):
     feature = sae.W_dec[feature_idx]
@@ -458,118 +482,49 @@ def get_ov_norms_for_transcoder_feature(model, transcoder, feature_idx, layer=No
 
     return ov_norms
 
-#def get_deembeddings_for_transcoder_feature(model, transcoder, feature_idx, attn_head=None, attn_layer=0, k=7):
-#    with torch.no_grad():
-#        if attn_head is not None:
-#            pulledback_feature = model.W_E @ model.OV.AB[attn_layer, attn_head] @ transcoder.W_enc[:, feature_idx]
-#        else:
-#            pulledback_feature = model.W_E @ transcoder.W_enc[:, feature_idx]
-#        if k == 0:
-#            return to_numpy(pulledback_feature)
-#        else:
-#            most_pos = torch.topk(pulledback_feature, k=k)
-#            most_neg = torch.topk(-pulledback_feature, k=k)
-#    
-#            top_vals = to_numpy(most_pos.values)
-#            top_idxs = to_numpy(most_pos.indices)
-#            top_tokens = model.to_str_tokens(top_idxs)
-#            
-#            bot_vals = to_numpy(-most_neg.values)
-#            bot_idxs = to_numpy(most_neg.indices)
-#            bot_tokens = model.to_str_tokens(bot_idxs)
-#
-#            return to_numpy(pulledback_feature), zip(top_vals, top_tokens, bot_vals, bot_tokens)
-            
-            
-#def get_deembeddings_for_transcoder_feature(model, transcoder, feature_idx, attn_head=None, attn_layer=0, k=7):
-#    with torch.no_grad():
-        
-#        embedding_matrix = model.get_input_embeddings().weight
-#        W_enc = transcoder['state_dict']['W_enc'].to(torch.float16)
-          # Corrected access
-        #print(f"Embedding matrix dtype: {embedding_matrix.dtype}")
-        #print(f"Embedding matrix shape: {embedding_matrix.shape}")
-        #print(f"W_enc dtype: {W_enc.dtype}")
-        #print(f"W_enc shape: {W_enc.shape}")
-
-
-#        if attn_head is not None:
-#            pulledback_feature = embedding_matrix @ model.OV.AB[attn_layer, attn_head] @ W_enc[:, feature_idx]
-#        else:
-#            pulledback_feature = embedding_matrix @ W_enc[:, feature_idx]
-        
-#        if k == 0:
-#            return to_numpy(pulledback_feature)
-#        else:
-#            most_pos = torch.topk(pulledback_feature, k=k)
-#            most_neg = torch.topk(-pulledback_feature, k=k)
-    
-#            top_vals = to_numpy(most_pos.values)
-#            top_idxs = to_numpy(most_pos.indices)
-#            top_tokens = model.to_str_tokens(top_idxs)
-            
-#            bot_vals = to_numpy(-most_neg.values)
-#            bot_idxs = to_numpy(most_neg.indices)
-#            bot_tokens = model.to_str_tokens(bot_idxs)
-
-#            return to_numpy(pulledback_feature), zip(top_vals, top_tokens, bot_vals, bot_tokens)
-
-def get_deembeddings_for_transcoder_feature(model, tokenizer, transcoder, feature_idx, attn_head=None, attn_layer=0, k=7):
+def get_deembeddings_for_transcoder_feature(model, transcoder, feature_idx, attn_head=None, attn_layer=0, k=7):
     with torch.no_grad():
-        # Access embedding matrix and transcoder weights
-        embedding_matrix = model.get_input_embeddings().weight
-        W_enc = transcoder['state_dict']['W_enc'].to(torch.float16)  # Ensure correct dtype
-
-        # Perform matrix multiplication
         if attn_head is not None:
-            pulledback_feature = embedding_matrix @ model.OV.AB[attn_layer, attn_head].to(torch.float16) @ W_enc[:, feature_idx]
+            pulledback_feature = model.W_E @ model.OV.AB[attn_layer, attn_head] @ transcoder.W_enc[:, feature_idx]
         else:
-            pulledback_feature = embedding_matrix @ W_enc[:, feature_idx]
-        
+            pulledback_feature = model.W_E @ transcoder.W_enc[:, feature_idx]
         if k == 0:
-            return pulledback_feature.cpu().numpy()
+            return to_numpy(pulledback_feature)
         else:
-            # Get top k positive and negative de-embeddings
             most_pos = torch.topk(pulledback_feature, k=k)
             most_neg = torch.topk(-pulledback_feature, k=k)
     
-            top_vals = most_pos.values.cpu().numpy()
-            top_idxs = most_pos.indices.cpu().numpy()
-            top_tokens = tokenizer.convert_ids_to_tokens(top_idxs)
+            top_vals = to_numpy(most_pos.values)
+            top_idxs = to_numpy(most_pos.indices)
+            top_tokens = model.to_str_tokens(top_idxs)
             
-            bot_vals = -most_neg.values.cpu().numpy()
-            bot_idxs = most_neg.indices.cpu().numpy()
-            bot_tokens = tokenizer.convert_ids_to_tokens(bot_idxs)
+            bot_vals = to_numpy(-most_neg.values)
+            bot_idxs = to_numpy(most_neg.indices)
+            bot_tokens = model.to_str_tokens(bot_idxs)
 
-            return pulledback_feature.cpu().numpy(), zip(top_vals, top_tokens, bot_vals, bot_tokens)
+            return to_numpy(pulledback_feature), zip(top_vals, top_tokens, bot_vals, bot_tokens)
             
             
 
-
-def get_deembeddings_from_vector(model, tokenizer, vector, k=10):
+        
+def get_deembeddings_for_feature_vector(model, vector, k=7):
     with torch.no_grad():
-        # Access the embedding matrix
-        embedding_matrix = model.get_input_embeddings().weight
-
-        # Perform matrix multiplication for unembedding the feature vector
-        pulledback_feature = embedding_matrix @ torch.tensor(vector, dtype=torch.float16).to(embedding_matrix.device)
-
+        pulledback_feature = model.W_E @ vector
         if k == 0:
-            return pulledback_feature.cpu().numpy()
+            return to_numpy(pulledback_feature)
         else:
-            # Get top k positive and negative de-embeddings
             most_pos = torch.topk(pulledback_feature, k=k)
             most_neg = torch.topk(-pulledback_feature, k=k)
-
-            top_vals = most_pos.values.cpu().numpy()
-            top_idxs = most_pos.indices.cpu().numpy()
-            top_tokens = tokenizer.convert_ids_to_tokens(top_idxs)
+    
+            top_vals = to_numpy(most_pos.values)
+            top_idxs = to_numpy(most_pos.indices)
+            top_tokens = model.to_str_tokens(top_idxs)
             
-            bot_vals = -most_neg.values.cpu().numpy()
-            bot_idxs = most_neg.indices.cpu().numpy()
-            bot_tokens = tokenizer.convert_ids_to_tokens(bot_idxs)
+            bot_vals = to_numpy(-most_neg.values)
+            bot_idxs = to_numpy(most_neg.indices)
+            bot_tokens = model.to_str_tokens(bot_idxs)
 
-            return list(zip(top_vals, top_tokens, bot_vals, bot_tokens))
+            return to_numpy(pulledback_feature), zip(top_vals, top_tokens, bot_vals, bot_tokens)
 
 
 
