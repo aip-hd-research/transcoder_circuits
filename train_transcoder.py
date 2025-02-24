@@ -21,6 +21,8 @@ import wandb
 from wandb.cli.cli import offline
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1,2"
 
 from sae_training.config import LanguageModelSAERunnerConfig
 from sae_training.utils import LMSparseAutoencoderSessionloader
@@ -28,12 +30,12 @@ from sae_training.train_sae_on_language_model import train_sae_on_language_model
 
 def main(args):
     lr = 4e-4  # learning rate
-    l1_coeff = 9e-7  # l1 sparsity regularization coefficient 1.4e-4
+    l1_coeff = 1e-6  # l1 sparsity regularization coefficient 1.4e-4
     expansion_factor = 8
 
     batch_size = 4096
     per_device_batch_size = None
-    total_training_tokens = 81_380_000
+    total_training_tokens = 50_000_000
     l1_warm_up_steps = 5000
 
     cfg = LanguageModelSAERunnerConfig(
@@ -45,12 +47,14 @@ def main(args):
         #    pre-MLP LayerNorm -- that is, the inputs to the MLP.
         # You might alternatively prefer to train on "blocks.8.hook_resid_mid",
         #    which corresponds to the input to the pre-MLP LayerNorm.
-        hook_point="blocks.19.ln2.hook_normalized",
-        hook_point_layer=19,
-        d_in=4096,
-        dataset_path="codeparrot/github-code",
+        hook_point="blocks.17.ln2.hook_normalized",
+        hook_point_layer=17,
+        d_in=1600,
+        dataset_path="Skylion007/openwebtext",
         is_dataset_tokenized=False,
-        model_name='CodeLlama-7b-Instruct-hf',
+
+        # using on of 'CodeLlama-7b-Instruct-hf', 'MistralHermes-CodePro-7B-v1' and 'Magicoder-S-DS-6.7B'
+        model_name="gpt2-xl",
 
         # Transcoder-specific parameters.
         is_transcoder=True,  # We're training a transcoder here.
@@ -63,9 +67,9 @@ def main(args):
         # As such, we want to grab the "hook_mlp_out" activations from our
         #    transformer, which (as the name suggests), represent the
         #    output activations of the original MLP sublayer.
-        out_hook_point="blocks.19.hook_mlp_out",
-        out_hook_point_layer=19,
-        d_out=4096,
+        out_hook_point="blocks.17.hook_mlp_out",
+        out_hook_point_layer=17,
+        d_out=1600,
 
         # SAE Parameters
         expansion_factor=expansion_factor,
@@ -84,7 +88,7 @@ def main(args):
         n_batches_in_buffer=32,  # Must be large enough so that n_batches_in_buffer * store_batch_size * context_size >= 2 * train_batch_size
         total_training_tokens=total_training_tokens,
         store_batch_size=4,
-        data_column="code",
+        data_column="text",
         improve_mixing=True,  # Disabling this mean you can get as low as n_batches_in_buffer * store_batch_size * context_size >= train_batch_size
 
         # Dead Neurons and Sparsity
@@ -98,7 +102,7 @@ def main(args):
 
         # WANDB
         log_to_wandb=True,
-        wandb_project="Transcoder_Codellama",
+        wandb_project="Transcoder_gpt2-xl",
         wandb_entity="pvs-shared",
         wandb_group=None,
         wandb_log_frequency=10,
@@ -108,10 +112,10 @@ def main(args):
         device="cuda:0",
         seed=42,
         n_checkpoints=0,
-        checkpoint_path="/nfs/data/shared/codellama-transcoders",  # change as you please
+        checkpoint_path="/nfs/data/shared/gpt2-xl-transcoders",  # change as you please
         dtype=torch.float32,
         model_dtype=torch.float16,
-        model_device="cuda:1",
+        model_device="cuda:0",
         lazy_device_loading=False,
     )
 
