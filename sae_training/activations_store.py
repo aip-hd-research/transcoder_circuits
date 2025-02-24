@@ -156,13 +156,12 @@ class ActivationsStore:
             ][act_name][:,:,self.cfg.hook_point_head_index]
         else:
             if not self.cfg.is_transcoder:
-                activations = self.model.run_with_cache(
+                cache = self.model.run_with_cache(
                     batch_tokens,
-                    names_filter=act_name,
+                    names_filter=[act_name],
                     stop_at_layer=hook_point_layer+1
-                )[
-                    1
-                ][act_name]
+                )[1] 
+                activations = cache[act_name]
             else:
                 cache = self.model.run_with_cache(
                     batch_tokens,
@@ -253,7 +252,7 @@ class ActivationsStore:
                 refill_activations = self.get_activations(refill_batch_tokens)
                 new_buffer[
                     refill_batch_idx_start : refill_batch_idx_start + batch_size
-                ] = refill_activations
+                ] = refill_activations[0]
             else:
                 refill_activations_in, refill_activations_out = self.get_activations(refill_batch_tokens)
                 new_buffer[
