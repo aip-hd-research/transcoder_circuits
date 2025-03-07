@@ -507,7 +507,7 @@ def get_deembeddings_for_transcoder_feature(model, transcoder, feature_idx, attn
             
 
         
-def get_deembeddings_for_feature_vector(model, vector, k=7):
+def get_deembeddings_from_vector(model, vector, k=7):
     with torch.no_grad():
         pulledback_feature = model.W_E @ vector
         if k == 0:
