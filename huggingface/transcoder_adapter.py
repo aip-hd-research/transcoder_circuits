@@ -10,6 +10,10 @@ from transformers import AutoModelForCausalLM, pipeline
 
 from sae_training.config import LanguageModelSAERunnerConfig
 from sae_training.sparse_autoencoder import SparseAutoencoder
+import sae_training
+import transcoder_circuits
+# expose aliased config to allow unpickling from old transcoder files
+transcoder_circuits.sae_training = sae_training
 
 
 def anthropic_style_weight_init(layer: nn.Linear):
@@ -75,7 +79,7 @@ class TranscoderAdapter(nn.Module):
         return sae_out
 
     @classmethod
-    def load(cls, path: Path):
+    def load(cls, path: Path):        
         cfg_and_states = torch.load(path, map_location="cpu", weights_only=False)
         module = cls(cfg_and_states["cfg"])
 
