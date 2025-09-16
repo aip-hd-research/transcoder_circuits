@@ -3,11 +3,40 @@
 import numpy as np
 import tqdm
 import torch
+import os
 
 import matplotlib.pyplot as plt
 
 from IPython.display import HTML
 from transformer_lens.utils import get_act_name, to_numpy
+
+
+os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
+os.environ["CUDA_VISIBLE_DEVICES"] = " 0"
+
+class EncoderConfig:
+    def __init__(self, hook_point, hook_point_layer):
+        self.hook_point = hook_point
+        self.hook_point_layer = hook_point_layer
+
+encoder_cfg = EncoderConfig(hook_point='resid_pre', hook_point_layer=19)
+
+# Custom function to simulate 'run_with_cache'
+def run_with_cache(model, input_ids, stop_at_layer, device='cuda:0'):
+    input_ids = input_ids.to(device)
+    
+    model = model.to(device)
+    
+    outputs = {}
+    with torch.no_grad():  
+        layer_outputs = model(input_ids, output_hidden_states=True)
+        outputs[encoder_cfg.hook_point] = layer_outputs.hidden_states[stop_at_layer]
+
+    return outputs
+
+
+
+
 
 def get_feature_scores(model, encoder, tokens_arr, feature_idx, batch_size=64, act_name='resid_pre', layer=0, use_raw_scores=False, use_decoder=False, feature_post=None, ignore_endoftext=False):
 	act_name = encoder.cfg.hook_point
@@ -34,6 +63,7 @@ def get_feature_scores(model, encoder, tokens_arr, feature_idx, batch_size=64, a
 					cur_scores[tokens_arr[i:i+batch_size].reshape(-1) == endoftext_token] = -torch.inf
 		scores.append(to_numpy(cur_scores.reshape(-1, tokens_arr.shape[1])).astype(np.float16))
 	return np.concatenate(scores)
+
 
 # get indices and values at uniform percentiles of arr
 def sample_percentiles(arr, num_samples):
@@ -190,20 +220,31 @@ def get_uniform_band_examples(scores, uniform_vals, uniform_idxs, num_bands, ban
         retlist.append((low_score, high_score, num_examples_in_band, uniform_idxs[np.logical_and(uniform_vals>=low_score, uniform_vals<=high_score)]))
     return retlist
 
-def display_activating_examples_dash(model, all_tokens, scores,
+
+    
+    
+    
+    
+    
+    
+def display_activating_examples_dash(model, tokenizer, all_tokens, scores,
      num_examples=50,
      num_bands=5,
      bandwidth=10,
      return_percentages=True,
      window_size=5,
-     header_level=3
+     header_level=3,
+     output_file_path='output.html'
     ):
+    
+    cur_html_list = []
+    
     if type(header_level) is int:
         header_tag = f'h{header_level}'
     else:
         header_tag = 'p'
-
-    display(HTML(f"<{header_tag} style='font-family: serif'>Firing frequency: {100*np.sum(scores > 0)/np.prod(scores.shape):.4f}%</{header_tag}>"))
+    
+    cur_html_list.append(HTML(f"<{header_tag} style='font-family: serif'>Firing frequency: {100*np.sum(scores > 0)/np.prod(scores.shape):.4f}%</{header_tag}>"))
     uniform_vals, uniform_idxs = sample_uniform(scores, num_examples, unique=True)
     unif_bands = get_uniform_band_examples(scores, uniform_vals, uniform_idxs, num_bands, bandwidth, return_percentages=return_percentages)
     for band in reversed(unif_bands):
@@ -211,12 +252,29 @@ def display_activating_examples_dash(model, all_tokens, scores,
         for example_idx, token_idx in reversed(band[3]):
             cur_html_list.append(
                 make_sequence_html(
-                    model.to_str_tokens(all_tokens[example_idx]), scores[example_idx],
+                    #model.to_str_tokens(all_tokens[example_idx])
+                    tokenizer.decode(all_tokens[example_idx]), scores[example_idx],
                     scores_min=scores.min(), scores_max=scores.max(), return_head=True, cur_token_idx=token_idx, window_size=window_size
                 ) + f"<span> Example {example_idx}, token {token_idx}</span>" + "<br/>"
             )
         cur_html_list.append("</details>")
-        display(HTML("".join(cur_html_list)))
+        #display(HTML("".join(cur_html_list)))    
+        # Write the HTML content to a file
+    with open(output_file_path, 'w') as file:
+        file.write("<html><head><title>Activating Examples Dashboard</title></head><body>")
+        file.write("".join(cur_html_list))
+        file.write("</body></html>")
+
+    print(f"HTML file saved at: {output_file_path}")
+    
+    
+    
+    
+    
+    
+    
+    
+
 
 def get_logits_for_feature(model, sae, feature_idx, k=7):
     feature = sae.W_dec[feature_idx]
@@ -445,6 +503,32 @@ def get_deembeddings_for_transcoder_feature(model, transcoder, feature_idx, attn
             bot_tokens = model.to_str_tokens(bot_idxs)
 
             return to_numpy(pulledback_feature), zip(top_vals, top_tokens, bot_vals, bot_tokens)
+            
+            
+
+        
+def get_deembeddings_from_vector(model, vector, k=7):
+    with torch.no_grad():
+        pulledback_feature = model.W_E @ vector
+        if k == 0:
+            return to_numpy(pulledback_feature)
+        else:
+            most_pos = torch.topk(pulledback_feature, k=k)
+            most_neg = torch.topk(-pulledback_feature, k=k)
+    
+            top_vals = to_numpy(most_pos.values)
+            top_idxs = to_numpy(most_pos.indices)
+            top_tokens = model.to_str_tokens(top_idxs)
+            
+            bot_vals = to_numpy(-most_neg.values)
+            bot_idxs = to_numpy(most_neg.indices)
+            bot_tokens = model.to_str_tokens(bot_idxs)
+
+            return to_numpy(pulledback_feature), zip(top_vals, top_tokens, bot_vals, bot_tokens)
+
+
+
+
 
 def get_deembeddings_for_feature_vector(model, feature_vector, k=7):
     with torch.no_grad():
@@ -480,15 +564,17 @@ def plot_deembedding_for_transcoder_feature(model, transcoder, feature_idx, attn
     plt.ylabel("Connection strength")
     plt.show()
 
-def display_deembeddings_for_transcoder_feature(model, transcoder, feature_idx, attn_head=None, attn_layer=0, k=7):
-    pulledback_feature, deembeddings = get_deembeddings_for_transcoder_feature(model, transcoder, feature_idx, attn_head=attn_head, attn_layer=attn_layer, k=k)
+
+def display_deembeddings_for_transcoder_feature(model, tokenizer, transcoder, feature_idx, attn_head=None, attn_layer=0, k=7):
+    pulledback_feature, deembeddings = get_deembeddings_for_transcoder_feature(
+        model, tokenizer, transcoder, feature_idx, attn_head=attn_head, attn_layer=attn_layer, k=k
+    )
     deembeddings = list(deembeddings)
 
     table_html = """
 <style>
     span.token {
         font-family: monospace;
-        
         border-style: solid;
         border-width: 1px;
         border-color: #dddddd;
@@ -523,7 +609,10 @@ f"""<tr>
 </tr>"""
         table_html = table_html + row_html
     table_html = table_html + "</tbody></table>"
-    display(HTML(table_html))
+    
+    #display(HTML(table_html))  # Ensure correct import
+    print(table_html)
+
 
 def display_deembeddings_for_feature_vector(model, feature_vector, k=7):
     pulledback_feature, deembeddings = get_deembeddings_for_feature_vector(model, feature_vector, k=k)

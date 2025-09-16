@@ -2,6 +2,7 @@ from pathlib import Path
 
 import einops
 import torch
+import wandb
 from dill.logger import adapter
 from torch import nn
 from tqdm import tqdm
@@ -63,11 +64,19 @@ class TranscoderAdapter(nn.Module):
 
         sae_out = self.down_proj(feature_acts)
 
+        if wandb.run is not None:
+            wandb.run.log({
+                "Transcoder Output Stats/Min": sae_out.min().detach().cpu().numpy(),
+                "Transcoder Output Stats/Max": sae_out.max().detach().cpu().numpy(),
+                "Transcoder Output Stats/Mean": sae_out.mean().detach().cpu().numpy(),
+                "Transcoder Output Stats/Sum": sae_out.sum().detach().cpu().numpy(),
+            }, commit=False)
+
         return sae_out
 
     @classmethod
-    def load(cls, path: Path):
-        cfg_and_states = torch.load(path, map_location="cpu")
+    def load(cls, path: Path):        
+        cfg_and_states = torch.load(path, map_location="cpu", weights_only=False)
         module = cls(cfg_and_states["cfg"])
 
         state_dict = cfg_and_states["state_dict"]

@@ -38,7 +38,6 @@ def train_sae_on_language_model(
         dead_feature_window *= gradient_accumulation_steps
         wandb_log_frequency *= gradient_accumulation_steps
 
-
     if feature_sampling_method is not None:
         feature_sampling_method = feature_sampling_method.lower()
 
@@ -49,25 +48,24 @@ def train_sae_on_language_model(
     n_resampled_neurons = 0
     steps_before_reset = 0
     if n_checkpoints > 0:
-        checkpoint_thresholds = list(range(0, total_training_tokens, total_training_tokens // (n_checkpoints+1)))[1:]
-    
+        checkpoint_thresholds = list(range(0, total_training_tokens, total_training_tokens // (n_checkpoints + 1)))[1:]
+
     # track active features
     act_freq_scores = torch.zeros(sparse_autoencoder.cfg.d_sae, device=sparse_autoencoder.cfg.device)
     n_forward_passes_since_fired = torch.zeros(sparse_autoencoder.cfg.d_sae, device=sparse_autoencoder.cfg.device)
     n_frac_active_tokens = 0
-    
+
     optimizer = Adam(sparse_autoencoder.parameters(),
-                     lr = sparse_autoencoder.cfg.lr)
+                     lr=sparse_autoencoder.cfg.lr)
     scheduler = get_scheduler(
         sparse_autoencoder.cfg.lr_scheduler_name,
         optimizer=optimizer,
-        warm_up_steps = sparse_autoencoder.cfg.lr_warm_up_steps * gradient_accumulation_steps,
+        warm_up_steps=sparse_autoencoder.cfg.lr_warm_up_steps * gradient_accumulation_steps,
         training_steps=total_training_steps,
-        lr_end=sparse_autoencoder.cfg.lr / 10, # heuristic for now. 
+        lr_end=sparse_autoencoder.cfg.lr / 10,  # heuristic for now.
     )
     sparse_autoencoder.initialize_b_dec(activation_store)
     sparse_autoencoder.train()
-    
 
     if sparse_autoencoder.cfg.use_tqdm:
         pbar = tqdm(total=total_training_tokens, desc="Training SAE")
@@ -77,38 +75,40 @@ def train_sae_on_language_model(
         # Make sure the W_dec is still zero-norm
         sparse_autoencoder.set_decoder_norm_to_unit_norm()
 
+        if (feature_sampling_method == "anthropic") and ((n_training_steps + 1) % dead_feature_window == 0):
 
-        if (feature_sampling_method=="anthropic") and ((n_training_steps + 1) % dead_feature_window == 0):
-            
             feature_sparsity = act_freq_scores / n_frac_active_tokens
-            
+
             # if reset criterion is frequency in window, then then use that to generate indices.
             if sparse_autoencoder.cfg.dead_feature_estimation_method == "no_fire":
                 dead_neuron_indices = (act_freq_scores == 0).nonzero(as_tuple=False)[:, 0]
             elif sparse_autoencoder.cfg.dead_feature_estimation_method == "frequency":
-                dead_neuron_indices = (feature_sparsity < sparse_autoencoder.cfg.dead_feature_threshold).nonzero(as_tuple=False)[:, 0]
-            
+                dead_neuron_indices = (feature_sparsity < sparse_autoencoder.cfg.dead_feature_threshold).nonzero(
+                    as_tuple=False)[:, 0]
+
             if len(dead_neuron_indices) > 0:
-                
+
                 if len(dead_neuron_indices) > sparse_autoencoder.cfg.resample_batches * sparse_autoencoder.cfg.store_batch_size:
-                    print("Warning: more dead neurons than number of tokens. Consider sampling more tokens when resampling.")
-                
+                    print(
+                        "Warning: more dead neurons than number of tokens. Consider sampling more tokens when resampling.")
+
                 sparse_autoencoder.resample_neurons_anthropic(
-                    dead_neuron_indices, 
+                    dead_neuron_indices,
                     model,
-                    optimizer, 
+                    optimizer,
                     activation_store
                 )
 
                 if use_wandb:
-                    n_resampled_neurons = min(len(dead_neuron_indices), sparse_autoencoder.cfg.store_batch_size * sparse_autoencoder.cfg.resample_batches)
+                    n_resampled_neurons = min(len(dead_neuron_indices),
+                                              sparse_autoencoder.cfg.store_batch_size * sparse_autoencoder.cfg.resample_batches)
                     wandb.log(
                         {
                             "metrics/n_resampled_neurons": n_resampled_neurons,
                         },
                         step=n_training_steps,
                     )
-                
+
                 # for now, we'll hardcode this.
                 current_lr = scheduler.get_last_lr()[0]
                 reduced_lr = current_lr / 10_000
@@ -117,11 +117,11 @@ def train_sae_on_language_model(
                 steps_before_reset = 10_000
             else:
                 print("No dead neurons, skipping resampling")
-            
+
         # Resample dead neurons
         if (feature_sampling_method == "l2") and ((n_training_steps + 1) % dead_feature_window == 0):
             print("no l2 resampling currently. Please use anthropic resampling")
-            
+
         # after resampling, reset the sparsity:
         if (n_training_steps + 1) % feature_sampling_window == 0:
             feature_sparsity = act_freq_scores / n_frac_active_tokens
@@ -131,18 +131,16 @@ def train_sae_on_language_model(
             if use_wandb:
                 wandb_histogram = wandb.Histogram(log_feature_sparsity.numpy())
                 wandb.log(
-                    {   
+                    {
                         "metrics/mean_log10_feature_sparsity": log_feature_sparsity.mean().item(),
                         "metrics/log10_mean_feature_sparsity": log_mean_feature_sparsity.item(),
                         "plots/feature_density_line_chart": wandb_histogram,
                     },
                     step=n_training_steps,
                 )
-            
+
             act_freq_scores = torch.zeros(sparse_autoencoder.cfg.d_sae, device=sparse_autoencoder.cfg.device)
             n_frac_active_tokens = 0
-
-
 
         if (steps_before_reset > 0) and n_training_steps > 0:
             steps_before_reset -= 1
@@ -154,11 +152,11 @@ def train_sae_on_language_model(
 
         if n_training_steps % gradient_accumulation_steps == 0:
             optimizer.zero_grad()
-        
+
         ghost_grad_neuron_mask = (n_forward_passes_since_fired > sparse_autoencoder.cfg.dead_feature_window).bool()
         next_batch = activation_store.next_batch()
 
-        assert(sparse_autoencoder.cfg.is_transcoder == activation_store.cfg.is_transcoder)
+        assert (sparse_autoencoder.cfg.is_transcoder == activation_store.cfg.is_transcoder)
         if not sparse_autoencoder.cfg.is_transcoder:
             sae_in = next_batch
             # Forward and Backward Passes
@@ -184,7 +182,7 @@ def train_sae_on_language_model(
         did_fire = ((feature_acts > 0).float().sum(-2) > 0)
         n_forward_passes_since_fired += 1
         n_forward_passes_since_fired[did_fire] = 0
-        
+
         n_training_tokens += batch_size
 
         with torch.no_grad():
@@ -197,16 +195,17 @@ def train_sae_on_language_model(
                 # metrics for currents acts
                 l0 = (feature_acts > 0).float().sum(-1).mean()
                 current_learning_rate = optimizer.param_groups[0]["lr"]
-                
+
                 per_token_l2_loss = (sae_out - sae_in).pow(2).sum(dim=-1).squeeze()
                 total_variance = sae_in.pow(2).sum(-1)
-                explained_variance = 1 - per_token_l2_loss/total_variance
-                
+                explained_variance = 1 - per_token_l2_loss / total_variance
+
                 wandb.log(
                     {
                         # losses
                         "losses/mse_loss": mse_loss.item(),
-                        "losses/l1_loss": l1_loss.item() / sparse_autoencoder.l1_coefficient if sparse_autoencoder.l1_coefficient else 0, # normalize by l1 coefficient
+                        "losses/l1_loss": l1_loss.item() / sparse_autoencoder.l1_coefficient if sparse_autoencoder.l1_coefficient else 0,
+                        # normalize by l1 coefficient
                         "losses/ghost_grad_loss": ghost_grad_loss.item(),
                         "losses/overall_loss": loss.item(),
                         # variance explained
@@ -225,7 +224,7 @@ def train_sae_on_language_model(
                         .mean()
                         .item(),
                         "sparsity/dead_features": (
-                            feature_sparsity < dead_feature_threshold
+                                feature_sparsity < dead_feature_threshold
                         )
                         .float()
                         .mean()
@@ -265,7 +264,8 @@ def train_sae_on_language_model(
             path = f"{sparse_autoencoder.cfg.checkpoint_path}/{n_training_tokens}_{sparse_autoencoder.get_name()}.pt"
             log_feature_sparsity_path = f"{sparse_autoencoder.cfg.checkpoint_path}/{n_training_tokens}_{sparse_autoencoder.get_name()}_log_feature_sparsity.pt"
             sparse_autoencoder.save_model(path)
-            try: log_feature_sparsity
+            try:
+                log_feature_sparsity
             except NameError:
                 feature_sparsity = act_freq_scores / n_frac_active_tokens
                 log_feature_sparsity = torch.log10(feature_sparsity + 1e-10).detach().cpu()
@@ -279,14 +279,14 @@ def train_sae_on_language_model(
                 )
                 model_artifact.add_file(path)
                 wandb.log_artifact(model_artifact)
-                
+
                 sparsity_artifact = wandb.Artifact(
-                    f"{sparse_autoencoder.get_name()}_log_feature_sparsity", type="log_feature_sparsity", metadata=dict(cfg.__dict__)
+                    f"{sparse_autoencoder.get_name()}_log_feature_sparsity", type="log_feature_sparsity",
+                    metadata=dict(cfg.__dict__)
                 )
                 sparsity_artifact.add_file(log_feature_sparsity_path)
                 wandb.log_artifact(sparsity_artifact)
-                
-            
+
         n_training_steps += 1
 
     path = f"{sparse_autoencoder.cfg.checkpoint_path}/final_{sparse_autoencoder.get_name()}.pt"
@@ -295,11 +295,11 @@ def train_sae_on_language_model(
     torch.save(log_feature_sparsity, log_feature_sparsity_path)
     if cfg.log_to_wandb:
         sparsity_artifact = wandb.Artifact(
-                f"{sparse_autoencoder.get_name()}_log_feature_sparsity", type="log_feature_sparsity", metadata=dict(cfg.__dict__)
-            )
+            f"{sparse_autoencoder.get_name()}_log_feature_sparsity", type="log_feature_sparsity",
+            metadata=dict(cfg.__dict__)
+        )
         sparsity_artifact.add_file(log_feature_sparsity_path)
         wandb.log_artifact(sparsity_artifact)
-        
 
     return sparse_autoencoder
 
@@ -309,65 +309,71 @@ def make_standard_replacement_hook(sparse_autoencoder, model):
         activations = activations.to(device=sparse_autoencoder.device)
         activations = sparse_autoencoder.forward(activations)[0].to(activations.dtype)
         return activations.to(device=model.cfg.device)
+
     return standard_replacement_hook
+
 
 def make_head_replacement_hook(sparse_autoencoder, model, head_index):
     def head_replacement_hook(activations, hook):
         activations = activations.to(device=sparse_autoencoder.device)
-        new_actions = sparse_autoencoder.forward(activations[:,:,head_index])[0].to(activations.dtype)
-        activations[:,:,head_index] = new_actions
+        new_actions = sparse_autoencoder.forward(activations[:, :, head_index])[0].to(activations.dtype)
+        activations[:, :, head_index] = new_actions
         return activations.to(device=model.cfg.device)
+
     return head_replacement_hook
 
 
 @torch.no_grad()
-def run_evals(sparse_autoencoder: SparseAutoencoder, activation_store: ActivationsStore, model: HookedTransformer, n_training_steps: int):
-    
+def run_evals(sparse_autoencoder: SparseAutoencoder, activation_store: ActivationsStore, model: HookedTransformer,
+              n_training_steps: int):
     hook_point = sparse_autoencoder.cfg.hook_point
     hook_point_layer = sparse_autoencoder.cfg.hook_point_layer
     hook_point_head_index = sparse_autoencoder.cfg.hook_point_head_index
-    
-     ### Evals
+
+    ### Evals
     eval_tokens = activation_store.get_batch_tokens()
-    
+
     # Get Reconstruction Score
-    recons_score, ntp_loss, recons_loss, zero_abl_loss = get_recons_loss(sparse_autoencoder, model, activation_store, eval_tokens)
-    
+    recons_score, ntp_loss, recons_loss, zero_abl_loss = get_recons_loss(sparse_autoencoder, model, activation_store,
+                                                                         eval_tokens)
+
     # get cache
-    _, cache = model.run_with_cache(eval_tokens, prepend_bos=False, names_filter=[get_act_name("pattern", hook_point_layer), hook_point])
-    
+    _, cache = model.run_with_cache(eval_tokens, prepend_bos=False,
+                                    names_filter=[get_act_name("pattern", hook_point_layer), hook_point])
+
     # get act
     if sparse_autoencoder.cfg.hook_point_head_index is not None:
-        original_act = cache[sparse_autoencoder.cfg.hook_point][:,:,sparse_autoencoder.cfg.hook_point_head_index].to(device=sparse_autoencoder.device)
+        original_act = cache[sparse_autoencoder.cfg.hook_point][:, :, sparse_autoencoder.cfg.hook_point_head_index].to(
+            device=sparse_autoencoder.device)
     else:
         original_act = cache[sparse_autoencoder.cfg.hook_point].to(device=sparse_autoencoder.device)
-        
+
     sae_out, feature_acts, _, _, _, _ = sparse_autoencoder(
         original_act,
     )
-    patterns_original = cache[get_act_name("pattern", hook_point_layer)][:,hook_point_head_index].detach().cpu()
+    patterns_original = cache[get_act_name("pattern", hook_point_layer)][:, hook_point_head_index].detach().cpu()
     del cache
-    
+
     if "cuda" in str(model.cfg.device):
         torch.cuda.empty_cache()
-    
+
     l2_norm_in = torch.norm(original_act, dim=-1)
     l2_norm_out = torch.norm(sae_out, dim=-1)
     l2_norm_ratio = l2_norm_out / l2_norm_in
-    
+
     wandb.log(
         {
 
             # l2 norms
             "metrics/l2_norm": l2_norm_out.mean().item(),
             "metrics/l2_ratio": l2_norm_ratio.mean().item(),
-            
+
             # CE Loss
             "metrics/CE_loss_score": recons_score,
             "metrics/ce_loss_without_sae": ntp_loss,
             "metrics/ce_loss_with_sae": recons_loss,
             "metrics/ce_loss_with_ablation": zero_abl_loss,
-            
+
         },
         step=n_training_steps,
     )
@@ -375,32 +381,34 @@ def run_evals(sparse_autoencoder: SparseAutoencoder, activation_store: Activatio
     head_index = sparse_autoencoder.cfg.hook_point_head_index
     replacement_hook = make_standard_replacement_hook(sparse_autoencoder, model) if head_index is None \
         else make_head_replacement_hook(sparse_autoencoder, model, head_index)
-    
+
     # get attn when using reconstructed activations
     with model.hooks(fwd_hooks=[(hook_point, partial(replacement_hook))]):
         _, new_cache = model.run_with_cache(eval_tokens, names_filter=[get_act_name("pattern", hook_point_layer)])
-        patterns_reconstructed = new_cache[get_act_name("pattern", hook_point_layer)][:,hook_point_head_index].detach().cpu()
+        patterns_reconstructed = new_cache[get_act_name("pattern", hook_point_layer)][:,
+                                 hook_point_head_index].detach().cpu()
         del new_cache
-        
+
     # get attn when using reconstructed activations
     with model.hooks(fwd_hooks=[(hook_point, partial(zero_ablate_hook))]):
-        _, zero_ablation_cache = model.run_with_cache(eval_tokens, names_filter=[get_act_name("pattern", hook_point_layer)])
-        patterns_ablation = zero_ablation_cache[get_act_name("pattern", hook_point_layer)][:,hook_point_head_index].detach().cpu()
+        _, zero_ablation_cache = model.run_with_cache(eval_tokens,
+                                                      names_filter=[get_act_name("pattern", hook_point_layer)])
+        patterns_ablation = zero_ablation_cache[get_act_name("pattern", hook_point_layer)][:,
+                            hook_point_head_index].detach().cpu()
         del zero_ablation_cache
 
     # if dealing with a head SAE, do the head metrics.
     if sparse_autoencoder.cfg.hook_point_head_index:
-        
         # show patterns before/after
         # fig_patterns_original = px.imshow(patterns_original[0].numpy(), title="original attn scores",
         #     color_continuous_midpoint=0, color_continuous_scale="RdBu")
-        # fig_patterns_original.update_layout(coloraxis_showscale=False)         # hide colorbar 
+        # fig_patterns_original.update_layout(coloraxis_showscale=False)         # hide colorbar
         # wandb.log({"attention/patterns_original": wandb.Plotly(fig_patterns_original)}, step = n_training_steps)
         # fig_patterns_reconstructed = px.imshow(patterns_reconstructed[0].numpy(), title="reconstructed attn scores",
         #         color_continuous_midpoint=0, color_continuous_scale="RdBu")
         # fig_patterns_reconstructed.update_layout(coloraxis_showscale=False)         # hide colorbar
         # wandb.log({"attention/patterns_reconstructed": wandb.Plotly(fig_patterns_reconstructed)}, step = n_training_steps)
-        
+
         kl_result_reconstructed = kl_divergence_attention(patterns_original, patterns_reconstructed)
         kl_result_reconstructed = kl_result_reconstructed.sum(dim=-1).numpy()
         # print(kl_result.mean().item())
@@ -408,7 +416,7 @@ def run_evals(sparse_autoencoder: SparseAutoencoder, activation_store: Activatio
         #       color_continuous_midpoint=0, color_continuous_scale="RdBu").show()
         # px.histogram(kl_result.flatten()).show()
         # px.line(kl_result.mean(0), title="KL Divergence by Position").show()
-        
+
         kl_result_ablation = kl_divergence_attention(patterns_original, patterns_ablation)
         kl_result_ablation = kl_result_ablation.sum(dim=-1).numpy()
         # print(kl_result.mean().item())
@@ -416,16 +424,17 @@ def run_evals(sparse_autoencoder: SparseAutoencoder, activation_store: Activatio
         # #       color_continuous_midpoint=0, color_continuous_scale="RdBu").show()
         # px.histogram(kl_result.flatten()).show()
         # px.line(kl_result.mean(0), title="KL Divergence by Position").show()
-    
+
         wandb.log(
             {
 
-              "metrics/kldiv_reconstructed": kl_result_reconstructed.mean().item(),
-              "metrics/kldiv_ablation": kl_result_ablation.mean().item(),
-                
+                "metrics/kldiv_reconstructed": kl_result_reconstructed.mean().item(),
+                "metrics/kldiv_ablation": kl_result_ablation.mean().item(),
+
             },
             step=n_training_steps,
         )
+
 
 @torch.no_grad()
 def get_recons_loss(sparse_autoencoder, model, activation_store, batch_tokens):
@@ -462,7 +471,6 @@ def zero_ablate_hook(mlp_post, hook):
 
 
 def kl_divergence_attention(y_true, y_pred):
-
     # Compute log probabilities for KL divergence
     log_y_true = torch.log2(y_true + 1e-10)
     log_y_pred = torch.log2(y_pred + 1e-10)

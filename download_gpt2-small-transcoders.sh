@@ -1,3 +1,4 @@
+#!/bin/bash
 echo "Checking whether transcoders present."
 DIR_NAME='./gpt-2-small-transcoders'
 if [ ! -d "$DIR_NAME" ]; then
@@ -7,10 +8,11 @@ if [ -z $(ls -A "$DIR_NAME") ]; then
     echo "Transcoders not found. Downloading transcoders."
 
     export HF_HUB_DISABLE_PROGRESS_BARS=1
-    python - <<HERE
+    python3 - <<-"HERE"
 from huggingface_hub import snapshot_download
+import os
 snapshot_download(repo_id="pchlenski/gpt2-transcoders", allow_patterns=["*.pt"],
-    local_dir="$DIR_NAME", local_dir_use_symlinks=False
+    local_dir=os.getenv("DIR_NAME"), local_dir_use_symlinks=False
 )
 HERE
     export HF_HUB_DISABLE_PROGRESS_BARS=0
