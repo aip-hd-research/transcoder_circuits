@@ -15,21 +15,20 @@ from sae_training.sparse_autoencoder import SparseAutoencoder
 
 
 def train_sae_on_language_model(
-        cfg,
-        model: HookedTransformer,
-        sparse_autoencoder: SparseAutoencoder,
-        activation_store: ActivationsStore,
-        batch_size: int = 1024,
-        per_device_batch_size: Optional[int] = None,
-        n_checkpoints: int = 0,
-        feature_sampling_method: str = "l2",  # None, l2, or anthropic
-        feature_sampling_window: int = 1000,
-        # how many training steps between resampling the features / considiring neurons dead
-        feature_reinit_scale: float = 0.2,  # how much to scale the resampled features by
-        dead_feature_threshold: float = 1e-8,  # how infrequently a feature has to be active to be considered dead
-        dead_feature_window: int = 2000,  # how many training steps before a feature is considered dead
-        use_wandb: bool = False,
-        wandb_log_frequency: int = 50,
+    cfg,  
+    model: HookedTransformer,
+    sparse_autoencoder: SparseAutoencoder,
+    activation_store: ActivationsStore,
+    batch_size: int = 1024,
+    per_device_batch_size: Optional[int] = None,
+    n_checkpoints: int = 0,
+    feature_sampling_method: str = "l2",  # None, l2, or anthropic
+    feature_sampling_window: int = 1000,  # how many training steps between resampling the features / considiring neurons dead
+    feature_reinit_scale: float = 0.2,  # how much to scale the resampled features by
+    dead_feature_threshold: float = 1e-8,  # how infrequently a feature has to be active to be considered dead
+    dead_feature_window: int = 2000,  # how many training steps before a feature is considered dead
+    use_wandb: bool = False,
+    wandb_log_frequency: int = 50,
 ):
     gradient_accumulation_steps = 1
     if per_device_batch_size is not None:
